@@ -1,37 +1,104 @@
 import { EmbedBuilder, TextChannel } from "discord.js";
-import { readFileSync, writeFileSync, existsSync } from "fs";
+import Database from "better-sqlite3";
 
 const CTFTIME_API = "https://ctftime.org/api/v1/events/?limit=20";
-const SENT_DB = "data/ctftime_sent.json";
 
-interface CtfEvent {
+export interface CtfEvent {
   id: number;
   title: string;
   start: string; // ISO
   finish: string;
-  duration_hours: number;
-  url: string;
-  format: string;
+  duration?: { hours?: number; days?: number };
+  url?: string;
+  format?: string;
   participants?: number;
   organizers: { id: number; name: string }[];
 }
 
-interface SentRecord {
-  [eventId: string]: string; // eventId -> phase ("running" | "upcoming")
+// ---- DB helpers ----
+
+export function openDb(path: string): Database.Database {
+  const db = new Database(path);
+  db.pragma("journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sent_events (
+      event_id INTEGER PRIMARY KEY,
+      phase TEXT NOT NULL CHECK (phase IN ('running','upcoming')),
+      title TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  return db;
 }
 
-function loadSent(): SentRecord {
-  try {
-    if (existsSync(SENT_DB)) return JSON.parse(readFileSync(SENT_DB, "utf8"));
-  } catch {
-    /* ignore */
+export type SentMap = Map<number, string>;
+
+export function loadSent(db: Database.Database): SentMap {
+  const rows = db.prepare("SELECT event_id, phase FROM sent_events").all() as {
+    event_id: number;
+    phase: string;
+  }[];
+  return new Map(rows.map((r) => [r.event_id, r.phase]));
+}
+
+export function saveSent(db: Database.Database, eventId: number, phase: string, title: string) {
+  db.prepare(
+    `INSERT INTO sent_events (event_id, phase, title) VALUES (?, ?, ?)
+     ON CONFLICT(event_id) DO UPDATE SET phase = excluded.phase, title = excluded.title, updated_at = datetime('now')`
+  ).run(eventId, phase, title);
+}
+
+// ---- logic (pure, testable) ----
+
+export function parseDuration(ev: CtfEvent): { days: number; hours: number } {
+  // CTFtime API mengirim duration sebagai {days, hours}
+  let days = Math.max(0, Math.floor(ev.duration?.days ?? 0));
+  let hours = Math.max(0, Math.floor(ev.duration?.hours ?? 0));
+  // fallback: kalau ada field legacy duration_hours
+  const legacy = (ev as unknown as { duration_hours?: number }).duration_hours;
+  if (days === 0 && hours === 0 && typeof legacy === "number" && legacy > 0) {
+    days = Math.floor(legacy / 24);
+    hours = Math.floor(legacy % 24);
   }
-  return {};
+  return { days, hours };
 }
 
-function saveSent(rec: SentRecord) {
-  writeFileSync(SENT_DB, JSON.stringify(rec, null, 2));
+export function formatDuration(ev: CtfEvent): string {
+  const { days, hours } = parseDuration(ev);
+  if (days > 0) return `${days} hari ${hours} jam`;
+  if (hours > 0) return `${hours} jam`;
+  return "durasi tidak diketahui";
 }
+
+export function isRelevant(ev: CtfEvent, now: number, upcomingDays = 7): "running" | "upcoming" | null {
+  const start = new Date(ev.start).getTime();
+  const end = new Date(ev.finish).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end)) return null;
+  if (now >= start && now < end) return "running";
+  if (start > now && start <= now + upcomingDays * 24 * 3600 * 1000) return "upcoming";
+  return null;
+}
+
+export function buildEmbed(ev: CtfEvent, phase: "running" | "upcoming"): EmbedBuilder {
+  const start = new Date(ev.start).getTime();
+  const end = new Date(ev.finish).getTime();
+  const running = phase === "running";
+  return new EmbedBuilder()
+    .setTitle(`${running ? "🔴" : "🟡"} ${ev.title}`)
+    .setURL(ev.url || null)
+    .addFields(
+      {
+        name: "Waktu",
+        value: `Mulai: <t:${Math.floor(start / 1000)}:F>\nSelesai: <t:${Math.floor(end / 1000)}:F>`,
+      },
+      { name: "Durasi", value: formatDuration(ev), inline: true },
+      { name: "Format", value: ev.format || "unknown", inline: true },
+      { name: "Organizer", value: ev.organizers?.map((o) => o.name).join(", ") || "unknown" }
+    )
+    .setColor(running ? 0xff4444 : 0xffaa00);
+}
+
+// ---- main check ----
 
 async function fetchEvents(): Promise<CtfEvent[]> {
   const res = await fetch(CTFTIME_API, { headers: { "User-Agent": "discord-bot-ctftime" } });
@@ -40,44 +107,24 @@ async function fetchEvents(): Promise<CtfEvent[]> {
 }
 
 export async function checkCtftime(
-  channel: TextChannel,
+  channel: Pick<TextChannel, "send">,
+  db: Database.Database,
   force = false
 ): Promise<number> {
   const events = await fetchEvents();
-  const sent = loadSent();
+  const sent = loadSent(db);
   const now = Date.now();
   const batch: EmbedBuilder[] = [];
+  const newSent: { ev: CtfEvent; phase: "running" | "upcoming" }[] = [];
 
   for (const ev of events) {
-    const start = new Date(ev.start).getTime();
-    const end = new Date(ev.finish).getTime();
-    const running = now >= start && now < end;
-    // CTF berjalan, atau mulai dalam <=7 hari
-    if (!running && (start <= now || start > now + 7 * 24 * 3600 * 1000)) continue;
+    const phase = isRelevant(ev, now);
+    if (!phase) continue;
+    if (!force && sent.get(ev.id) === phase) continue;
 
-    const phase = running ? "running" : "upcoming";
-    if (!force && sent[ev.id] === phase) continue;
-
-    const dur = Math.floor(ev.duration_hours / 24);
-    const hrs = ev.duration_hours % 24;
-    const embed = new EmbedBuilder()
-      .setTitle(`${running ? "🔴" : "🟡"} ${ev.title}`)
-      .setURL(ev.url || null)
-      .addFields(
-        {
-          name: "Waktu",
-          value: `Mulai: <t:${Math.floor(start / 1000)}:F>\nSelesai: <t:${Math.floor(end / 1000)}:F>`,
-        },
-        { name: "Durasi", value: dur > 0 ? `${dur} hari ${hrs} jam` : `${hrs} jam`, inline: true },
-        { name: "Format", value: ev.format || "unknown", inline: true },
-        {
-          name: "Organizer",
-          value: ev.organizers?.map((o) => o.name).join(", ") || "unknown",
-        }
-      )
-      .setColor(running ? 0xff4444 : 0xffaa00);
-    batch.push(embed);
-    sent[ev.id] = phase;
+    batch.push(buildEmbed(ev, phase));
+    sent.set(ev.id, phase);
+    newSent.push({ ev, phase });
   }
 
   if (batch.length > 0) {
@@ -85,7 +132,12 @@ export async function checkCtftime(
     for (let i = 0; i < batch.length; i += 10) {
       await channel.send({ embeds: batch.slice(i, i + 10) });
     }
-    saveSent(sent);
+    const persist = db.transaction(
+      (rows: { ev: CtfEvent; phase: "running" | "upcoming" }[]) => {
+        for (const { ev, phase } of rows) saveSent(db, ev.id, phase, ev.title);
+      }
+    );
+    persist(newSent);
   }
   return batch.length;
 }

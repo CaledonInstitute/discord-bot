@@ -1,6 +1,9 @@
 import { Client, Events, GatewayIntentBits, REST, Routes, TextChannel } from "discord.js";
 import "dotenv/config";
-import { checkCtftime } from "./ctftime.js";
+import { checkCtftime, openDb } from "./ctftime.js";
+
+const DB_PATH = "data/bot.sqlite";
+const db = openDb(DB_PATH);
 
 const GUILD_ID = "1021353479823962124";
 const CHANNEL_ID = "1563080040042995722";
@@ -42,7 +45,7 @@ async function getChannel(): Promise<TextChannel> {
 
 async function runCheck(force = false): Promise<number> {
   const channel = await getChannel();
-  return checkCtftime(channel, force);
+  return checkCtftime(channel, db, force);
 }
 
 client.on(Events.InteractionCreate, async (interaction) => {
