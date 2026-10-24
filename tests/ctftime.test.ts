@@ -110,12 +110,22 @@ describe("isRelevant", () => {
 });
 
 describe("buildEmbed (StealthCup regression)", () => {
-  it("duration field never contains NaN", () => {
-    const embed = buildEmbed(makeEvent(), "upcoming");
-    const json = JSON.stringify(embed.toJSON());
-    expect(json).not.toMatch(/NaN/);
+  it("contains all info fields", () => {
+    const ev = makeEvent({
+      weight: 25.5,
+      participants: 300,
+      ctftime_url: "https://ctftime.org/event/1/",
+      live_feed: "https://ctftime.org/live/1/",
+      logo: "https://example.com/logo.png",
+    });
+    const json = JSON.stringify(buildEmbed(ev, "upcoming").toJSON());
     expect(json).toContain("8 jam");
-    expect(json).toContain("StealthCup 2026");
+    expect(json).toContain("25.5");
+    expect(json).toContain("300 tim");
+    expect(json).toContain("0x01DA");
+    expect(json).toContain("Live Feed");
+    expect(json).toContain("CTFtime");
+    expect(json).not.toMatch(/NaN/);
   });
 });
 

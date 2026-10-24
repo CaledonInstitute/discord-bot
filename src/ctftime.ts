@@ -12,6 +12,10 @@ export interface CtfEvent {
   url?: string;
   format?: string;
   participants?: number;
+  weight?: number;
+  logo?: string;
+  ctftime_url?: string;
+  live_feed?: string;
   organizers: { id: number; name: string }[];
 }
 
@@ -83,9 +87,17 @@ export function buildEmbed(ev: CtfEvent, phase: "running" | "upcoming"): EmbedBu
   const start = new Date(ev.start).getTime();
   const end = new Date(ev.finish).getTime();
   const running = phase === "running";
-  return new EmbedBuilder()
+
+  const links: string[] = [];
+  if (ev.url) links.push(`[Website](${ev.url})`);
+  if (ev.ctftime_url) links.push(`[CTFtime](${ev.ctftime_url})`);
+  if (ev.live_feed) links.push(`[Live Feed](${ev.live_feed})`);
+
+  const embed = new EmbedBuilder()
     .setTitle(`${running ? "🔴" : "🟡"} ${ev.title}`)
-    .setURL(ev.url || null)
+    .setURL(ev.url || ev.ctftime_url || null)
+    .setThumbnail(ev.logo || null)
+    .setColor(running ? 0xff4444 : 0xffaa00)
     .addFields(
       {
         name: "Waktu",
@@ -93,9 +105,18 @@ export function buildEmbed(ev: CtfEvent, phase: "running" | "upcoming"): EmbedBu
       },
       { name: "Durasi", value: formatDuration(ev), inline: true },
       { name: "Format", value: ev.format || "unknown", inline: true },
+      { name: "Bobot", value: ev.weight != null ? String(ev.weight) : "unknown", inline: true },
+      {
+        name: "Tim Terdaftar",
+        value: ev.participants != null ? `${ev.participants} tim` : "unknown",
+        inline: true,
+      },
       { name: "Organizer", value: ev.organizers?.map((o) => o.name).join(", ") || "unknown" }
-    )
-    .setColor(running ? 0xff4444 : 0xffaa00);
+    );
+  if (links.length > 0) {
+    embed.addFields({ name: "Link", value: links.join(" • ") });
+  }
+  return embed;
 }
 
 // ---- main check ----
